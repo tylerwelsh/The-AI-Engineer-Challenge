@@ -404,7 +404,7 @@ async def suggest_topics(api_key: str):
         sample_text = "\n\n".join(sample_chunks[:3])  # Use first 3 for analysis
         
         # Create prompt for topic suggestion
-        suggestion_prompt = f"""Based on the following content from a PDF document, suggest 4-6 specific, interesting questions that a user might want to ask about this document. 
+        suggestion_prompt = f"""Based on the following content from a PDF document, suggest exactly 2 specific, interesting questions that a user might want to ask about this document. 
 
 Make the questions:
 - Specific and actionable
@@ -415,7 +415,7 @@ Make the questions:
 Content sample:
 {sample_text}
 
-Respond with ONLY a numbered list of questions, nothing else:"""
+Respond with ONLY a numbered list of exactly 2 questions, nothing else:"""
 
         logger.info("🤖 Generating topic suggestions using OpenAI")
         
@@ -434,15 +434,15 @@ Respond with ONLY a numbered list of questions, nothing else:"""
                 # Remove numbering and clean up
                 clean_question = line
                 # Remove common prefixes
-                for prefix in ['1.', '2.', '3.', '4.', '5.', '6.', '-', '•']:
+                for prefix in ['1.', '2.', '-', '•']:
                     if clean_question.startswith(prefix):
                         clean_question = clean_question[len(prefix):].strip()
                         break
                 if clean_question and len(clean_question) > 10:  # Ensure it's a real question
                     suggestions.append(clean_question)
         
-        # Limit to 6 suggestions maximum
-        suggestions = suggestions[:6]
+        # Limit to 2 suggestions maximum
+        suggestions = suggestions[:2]
         
         logger.info(f"✅ Generated {len(suggestions)} topic suggestions")
         

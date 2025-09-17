@@ -251,11 +251,10 @@ export default function ChatInterface() {
   // Handle clicking on a topic suggestion
   const handleSuggestionClick = (suggestion: string) => {
     setQuestion(suggestion)
-    // Auto-focus the input area for user to review and potentially modify
-    const textarea = document.querySelector('textarea')
-    if (textarea) {
-      textarea.focus()
-    }
+    // Auto-send the suggestion as a message
+    setTimeout(() => {
+      sendMessage()
+    }, 100) // Small delay to ensure state is updated
   }
 
   // Send RAG chat request to backend
@@ -466,50 +465,9 @@ export default function ChatInterface() {
           {messages.length === 0 && pdfStatus?.has_pdf && (
             <div className="text-center text-gray-400 py-8">
               <p className="text-lg mb-2">Ask questions about your PDF!</p>
-              <p className="text-sm mb-6">
+              <p className="text-sm">
                 I can only answer based on the content in the uploaded document.
               </p>
-              
-              {/* Topic Suggestions */}
-              {(topicSuggestions.length > 0 || isLoadingSuggestions) && (
-                <div className="max-w-4xl mx-auto">
-                  <div className="bg-primary-darker rounded-lg p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-white font-medium">Suggested Topics</h3>
-                      {pdfStatus?.has_pdf && topicSuggestions.length === 0 && !isLoadingSuggestions && (
-                        <button
-                          onClick={loadTopicSuggestions}
-                          className="text-primary hover:text-primary-dark text-sm transition-colors"
-                        >
-                          Generate Suggestions
-                        </button>
-                      )}
-                    </div>
-                    
-                    {isLoadingSuggestions ? (
-                      <div className="flex items-center justify-center py-4">
-                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
-                        <span className="ml-2 text-gray-300">Generating suggestions...</span>
-                      </div>
-                    ) : (
-                      <div className="grid gap-2">
-                        {topicSuggestions.map((suggestion, index) => (
-                          <button
-                            key={index}
-                            onClick={() => handleSuggestionClick(suggestion)}
-                            className="text-left p-3 bg-primary-darkest hover:bg-primary rounded-lg transition-colors group text-white"
-                          >
-                            <div className="flex items-center">
-                              <span className="text-primary group-hover:text-white text-sm mr-2">💡</span>
-                              <span className="text-sm">{suggestion}</span>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           )}
           
@@ -557,6 +515,48 @@ export default function ChatInterface() {
       {/* Input */}
       <div className="bg-primary-darkest p-4">
         <div className="max-w-6xl mx-auto">
+          {/* Topic Suggestions - Always visible when PDF is loaded */}
+          {pdfStatus?.has_pdf && (topicSuggestions.length > 0 || isLoadingSuggestions) && (
+            <div className="mb-4">
+              <div className="bg-primary-darker rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-white font-medium text-sm">Quick Questions</h3>
+                  {pdfStatus?.has_pdf && topicSuggestions.length === 0 && !isLoadingSuggestions && (
+                    <button
+                      onClick={loadTopicSuggestions}
+                      className="text-primary hover:text-primary-dark text-xs transition-colors"
+                    >
+                      Generate
+                    </button>
+                  )}
+                </div>
+                
+                {isLoadingSuggestions ? (
+                  <div className="flex items-center justify-center py-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    <span className="ml-2 text-gray-300 text-xs">Generating suggestions...</span>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 flex-wrap">
+                    {topicSuggestions.map((suggestion, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleSuggestionClick(suggestion)}
+                        disabled={isLoading}
+                        className="text-left p-2 bg-primary-darkest hover:bg-primary rounded transition-colors group text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <div className="flex items-center">
+                          <span className="text-primary group-hover:text-white text-xs mr-1">💡</span>
+                          <span className="text-xs">{suggestion}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="flex space-x-4">
             <div className="flex-1">
               <textarea
