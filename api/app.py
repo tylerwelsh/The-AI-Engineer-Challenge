@@ -11,7 +11,7 @@ import asyncio
 import tempfile
 import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 # Import aimakerspace components for RAG functionality
@@ -62,6 +62,10 @@ class UploadResponse(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources_used: int
+    has_pdf: bool
+
+class TopicSuggestionsResponse(BaseModel):
+    suggestions: List[str]
     has_pdf: bool
 
 async def process_pdf_and_create_vector_db(pdf_content: bytes, filename: str, api_key: str) -> tuple[VectorDatabase, int]:
@@ -359,6 +363,95 @@ async def clear_pdf():
         delattr(app.state, 'pdf_content')
     
     return {"message": "PDF cleared successfully"}
+
+
+@app.get("/api/suggest-topics", response_model=TopicSuggestionsResponse)
+async def suggest_topics(api_key: str):
+    """
+    Generate topic suggestions based on the uploaded PDF content.
+    
+    Args:
+        api_key: OpenAI API key for generating suggestions
+        
+    Returns:
+        TopicSuggestionsResponse with suggested questions and PDF status
+        
+    Raises:
+        HTTPException: If no PDF uploaded or processing fails
+    """
+    # Check if PDF has been uploaded
+    if not app.state.pdf_filename:
+        return TopicSuggestionsResponse(suggestions=[], has_pdf=False)
+    
+    # Check if PDF has been processed
+    if app.state.vector_db is None:
+        raise HTTPException(status_code=400, detail="PDF not processed yet. Please re-upload the PDF.")
+    
+    try:
+        logger.info("🔍 Generating topic suggestions from PDF content")
+        
+        # Sample up to 5 random chunks from the vector database for topic analysis
+        all_chunks = list(app.state.vector_db.vectors.keys())
+        sample_size = min(5, len(all_chunks))
+        
+        if sample_size == 0:
+            return TopicSuggestionsResponse(suggestions=[], has_pdf=True)
+        
+        # Get a representative sample of chunks
+        import random
+        random.seed(42)  # For consistent results
+        sample_chunks = random.sample(all_chunks, sample_size)
+        sample_text = "\n\n".join(sample_chunks[:3])  # Use first 3 for analysis
+        
+        # Create prompt for topic suggestion
+        suggestion_prompt = f"""Based on the following content from a PDF document, suggest 4-6 specific, interesting questions that a user might want to ask about this document. 
+
+Make the questions:
+- Specific and actionable
+- Diverse in scope (covering different aspects/topics)
+- Natural and conversational
+- Focused on key information that seems important
+
+Content sample:
+{sample_text}
+
+Respond with ONLY a numbered list of questions, nothing else:"""
+
+        logger.info("🤖 Generating topic suggestions using OpenAI")
+        
+        # Set OpenAI API key
+        os.environ["OPENAI_API_KEY"] = api_key
+        
+        # Generate suggestions using ChatOpenAI
+        chat_model = ChatOpenAI(model_name="gpt-4o-mini")
+        response = chat_model.run([{"role": "user", "content": suggestion_prompt}])
+        
+        # Parse the response to extract individual questions
+        suggestions = []
+        for line in response.split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
+                # Remove numbering and clean up
+                clean_question = line
+                # Remove common prefixes
+                for prefix in ['1.', '2.', '3.', '4.', '5.', '6.', '-', '•']:
+                    if clean_question.startswith(prefix):
+                        clean_question = clean_question[len(prefix):].strip()
+                        break
+                if clean_question and len(clean_question) > 10:  # Ensure it's a real question
+                    suggestions.append(clean_question)
+        
+        # Limit to 6 suggestions maximum
+        suggestions = suggestions[:6]
+        
+        logger.info(f"✅ Generated {len(suggestions)} topic suggestions")
+        
+        return TopicSuggestionsResponse(suggestions=suggestions, has_pdf=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating topic suggestions: {str(e)}")
+        # Return empty suggestions rather than failing completely
+        return TopicSuggestionsResponse(suggestions=[], has_pdf=True)
 
 
 @app.get("/api/health")

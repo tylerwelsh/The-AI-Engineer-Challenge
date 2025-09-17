@@ -31,6 +31,11 @@ interface StatusResponse {
   vector_db_ready: boolean
 }
 
+interface TopicSuggestionsResponse {
+  suggestions: string[]
+  has_pdf: boolean
+}
+
 export default function ChatInterface() {
   const [apiKey, setApiKey] = useState('')
   const [question, setQuestion] = useState('')
@@ -41,6 +46,8 @@ export default function ChatInterface() {
   const [isUploading, setIsUploading] = useState(false)
   const [pdfStatus, setPdfStatus] = useState<StatusResponse | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
+  const [topicSuggestions, setTopicSuggestions] = useState<string[]>([])
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -86,6 +93,7 @@ export default function ChatInterface() {
     setApiKey('')
     setShowApiKeyInput(true)
     setPdfStatus(null)
+    setTopicSuggestions([])
     toast.success('API key cleared')
   }
 
@@ -98,9 +106,33 @@ export default function ChatInterface() {
       if (response.ok) {
         const status: StatusResponse = await response.json()
         setPdfStatus(status)
+        
+        // Load topic suggestions if PDF is ready and we don't have suggestions yet
+        if (status.has_pdf && status.vector_db_ready && topicSuggestions.length === 0) {
+          loadTopicSuggestions()
+        }
       }
     } catch (error) {
       console.error('Error checking PDF status:', error)
+    }
+  }
+
+  // Load topic suggestions from backend
+  const loadTopicSuggestions = async () => {
+    if (!apiKey.trim() || !pdfStatus?.has_pdf || isLoadingSuggestions) return
+
+    setIsLoadingSuggestions(true)
+    try {
+      const response = await fetch(`${getBackendUrl()}/api/suggest-topics?api_key=${encodeURIComponent(apiKey)}`)
+      if (response.ok) {
+        const suggestionsResponse: TopicSuggestionsResponse = await response.json()
+        setTopicSuggestions(suggestionsResponse.suggestions)
+      }
+    } catch (error) {
+      console.error('Error loading topic suggestions:', error)
+      toast.error('Failed to load topic suggestions')
+    } finally {
+      setIsLoadingSuggestions(false)
     }
   }
 
@@ -146,8 +178,9 @@ export default function ChatInterface() {
       const uploadResponse: UploadResponse = await response.json()
       toast.success(`PDF uploaded: ${uploadResponse.filename}`)
       
-      // Clear messages when new PDF is uploaded
+      // Clear messages and suggestions when new PDF is uploaded
       setMessages([])
+      setTopicSuggestions([])
       
       // Refresh status
       await checkPdfStatus()
@@ -208,9 +241,20 @@ export default function ChatInterface() {
       await fetch(`${getBackendUrl()}/api/pdf`, { method: 'DELETE' })
       setPdfStatus(null)
       setMessages([])
+      setTopicSuggestions([])
       toast.success('PDF cleared')
     } catch (error) {
       toast.error('Failed to clear PDF')
+    }
+  }
+
+  // Handle clicking on a topic suggestion
+  const handleSuggestionClick = (suggestion: string) => {
+    setQuestion(suggestion)
+    // Auto-focus the input area for user to review and potentially modify
+    const textarea = document.querySelector('textarea')
+    if (textarea) {
+      textarea.focus()
     }
   }
 
@@ -422,9 +466,50 @@ export default function ChatInterface() {
           {messages.length === 0 && pdfStatus?.has_pdf && (
             <div className="text-center text-gray-400 py-8">
               <p className="text-lg mb-2">Ask questions about your PDF!</p>
-              <p className="text-sm">
+              <p className="text-sm mb-6">
                 I can only answer based on the content in the uploaded document.
               </p>
+              
+              {/* Topic Suggestions */}
+              {(topicSuggestions.length > 0 || isLoadingSuggestions) && (
+                <div className="max-w-4xl mx-auto">
+                  <div className="bg-primary-darker rounded-lg p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-white font-medium">Suggested Topics</h3>
+                      {pdfStatus?.has_pdf && topicSuggestions.length === 0 && !isLoadingSuggestions && (
+                        <button
+                          onClick={loadTopicSuggestions}
+                          className="text-primary hover:text-primary-dark text-sm transition-colors"
+                        >
+                          Generate Suggestions
+                        </button>
+                      )}
+                    </div>
+                    
+                    {isLoadingSuggestions ? (
+                      <div className="flex items-center justify-center py-4">
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+                        <span className="ml-2 text-gray-300">Generating suggestions...</span>
+                      </div>
+                    ) : (
+                      <div className="grid gap-2">
+                        {topicSuggestions.map((suggestion, index) => (
+                          <button
+                            key={index}
+                            onClick={() => handleSuggestionClick(suggestion)}
+                            className="text-left p-3 bg-primary-darkest hover:bg-primary rounded-lg transition-colors group text-white"
+                          >
+                            <div className="flex items-center">
+                              <span className="text-primary group-hover:text-white text-sm mr-2">💡</span>
+                              <span className="text-sm">{suggestion}</span>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           
