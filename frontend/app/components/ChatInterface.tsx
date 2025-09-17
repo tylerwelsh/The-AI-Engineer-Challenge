@@ -250,11 +250,80 @@ export default function ChatInterface() {
 
   // Handle clicking on a topic suggestion
   const handleSuggestionClick = (suggestion: string) => {
-    setQuestion(suggestion)
-    // Auto-send the suggestion as a message
-    setTimeout(() => {
-      sendMessage()
-    }, 100) // Small delay to ensure state is updated
+    // Send the suggestion directly without relying on state timing
+    sendSuggestionMessage(suggestion)
+  }
+
+  // Send a suggestion message directly
+  const sendSuggestionMessage = async (suggestionText: string) => {
+    if (!suggestionText.trim()) {
+      toast.error('Please enter a question')
+      return
+    }
+
+    if (!apiKey.trim()) {
+      toast.error('Please set your OpenAI API key first')
+      setShowApiKeyInput(true)
+      return
+    }
+
+    if (!pdfStatus?.has_pdf) {
+      toast.error('Please upload a PDF first')
+      return
+    }
+
+    setIsLoading(true)
+
+    // Add user question to chat
+    const userMessage: Message = {
+      id: Date.now().toString() + '_user',
+      type: 'user',
+      content: suggestionText,
+      timestamp: new Date()
+    }
+
+    setMessages(prev => [...prev, userMessage])
+
+    try {
+      const response = await fetch(`${getBackendUrl()}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: suggestionText,
+          model: 'gpt-4o-mini',
+          api_key: apiKey
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`)
+      }
+
+      const chatResponse: ChatResponse = await response.json()
+
+      // Add assistant response
+      const assistantMessage: Message = {
+        id: Date.now().toString() + '_assistant',
+        type: 'assistant',
+        content: chatResponse.answer,
+        timestamp: new Date(),
+        sources_used: chatResponse.sources_used
+      }
+
+      setMessages(prev => [...prev, assistantMessage])
+      
+      // Update PDF status to refresh chunk count if needed
+      await checkPdfStatus()
+      
+    } catch (error) {
+      console.error('Error sending message:', error)
+      toast.error(error instanceof Error ? error.message : 'Failed to send message. Please check your connection and API key.')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   // Send RAG chat request to backend
@@ -287,6 +356,9 @@ export default function ChatInterface() {
 
     setMessages(prev => [...prev, userMessage])
 
+    // Clear input field immediately after adding user message
+    setQuestion('')
+
     try {
       const response = await fetch(`${getBackendUrl()}/api/chat`, {
         method: 'POST',
@@ -317,9 +389,6 @@ export default function ChatInterface() {
       }
 
       setMessages(prev => [...prev, assistantMessage])
-      
-      // Clear input field
-      setQuestion('')
       
       // Update PDF status to refresh chunk count if needed
       await checkPdfStatus()
