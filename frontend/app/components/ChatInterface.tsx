@@ -31,6 +31,11 @@ interface StatusResponse {
   vector_db_ready: boolean
 }
 
+interface TopicSuggestionsResponse {
+  suggestions: string[]
+  has_pdf: boolean
+}
+
 export default function ChatInterface() {
   const [apiKey, setApiKey] = useState('')
   const [question, setQuestion] = useState('')
@@ -41,6 +46,8 @@ export default function ChatInterface() {
   const [isUploading, setIsUploading] = useState(false)
   const [pdfStatus, setPdfStatus] = useState<StatusResponse | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
+  const [topicSuggestions, setTopicSuggestions] = useState<string[]>([])
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -86,6 +93,7 @@ export default function ChatInterface() {
     setApiKey('')
     setShowApiKeyInput(true)
     setPdfStatus(null)
+    setTopicSuggestions([])
     toast.success('API key cleared')
   }
 
@@ -98,9 +106,33 @@ export default function ChatInterface() {
       if (response.ok) {
         const status: StatusResponse = await response.json()
         setPdfStatus(status)
+        
+        // Load topic suggestions if PDF is ready and we don't have suggestions yet
+        if (status.has_pdf && status.vector_db_ready && topicSuggestions.length === 0) {
+          loadTopicSuggestions()
+        }
       }
     } catch (error) {
       console.error('Error checking PDF status:', error)
+    }
+  }
+
+  // Load topic suggestions from backend
+  const loadTopicSuggestions = async () => {
+    if (!apiKey.trim() || !pdfStatus?.has_pdf || isLoadingSuggestions) return
+
+    setIsLoadingSuggestions(true)
+    try {
+      const response = await fetch(`${getBackendUrl()}/api/suggest-topics?api_key=${encodeURIComponent(apiKey)}`)
+      if (response.ok) {
+        const suggestionsResponse: TopicSuggestionsResponse = await response.json()
+        setTopicSuggestions(suggestionsResponse.suggestions)
+      }
+    } catch (error) {
+      console.error('Error loading topic suggestions:', error)
+      toast.error('Failed to load topic suggestions')
+    } finally {
+      setIsLoadingSuggestions(false)
     }
   }
 
@@ -146,8 +178,9 @@ export default function ChatInterface() {
       const uploadResponse: UploadResponse = await response.json()
       toast.success(`PDF uploaded: ${uploadResponse.filename}`)
       
-      // Clear messages when new PDF is uploaded
+      // Clear messages and suggestions when new PDF is uploaded
       setMessages([])
+      setTopicSuggestions([])
       
       // Refresh status
       await checkPdfStatus()
@@ -208,9 +241,88 @@ export default function ChatInterface() {
       await fetch(`${getBackendUrl()}/api/pdf`, { method: 'DELETE' })
       setPdfStatus(null)
       setMessages([])
+      setTopicSuggestions([])
       toast.success('PDF cleared')
     } catch (error) {
       toast.error('Failed to clear PDF')
+    }
+  }
+
+  // Handle clicking on a topic suggestion
+  const handleSuggestionClick = (suggestion: string) => {
+    // Send the suggestion directly without relying on state timing
+    sendSuggestionMessage(suggestion)
+  }
+
+  // Send a suggestion message directly
+  const sendSuggestionMessage = async (suggestionText: string) => {
+    if (!suggestionText.trim()) {
+      toast.error('Please enter a question')
+      return
+    }
+
+    if (!apiKey.trim()) {
+      toast.error('Please set your OpenAI API key first')
+      setShowApiKeyInput(true)
+      return
+    }
+
+    if (!pdfStatus?.has_pdf) {
+      toast.error('Please upload a PDF first')
+      return
+    }
+
+    setIsLoading(true)
+
+    // Add user question to chat
+    const userMessage: Message = {
+      id: Date.now().toString() + '_user',
+      type: 'user',
+      content: suggestionText,
+      timestamp: new Date()
+    }
+
+    setMessages(prev => [...prev, userMessage])
+
+    try {
+      const response = await fetch(`${getBackendUrl()}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: suggestionText,
+          model: 'gpt-4o-mini',
+          api_key: apiKey
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`)
+      }
+
+      const chatResponse: ChatResponse = await response.json()
+
+      // Add assistant response
+      const assistantMessage: Message = {
+        id: Date.now().toString() + '_assistant',
+        type: 'assistant',
+        content: chatResponse.answer,
+        timestamp: new Date(),
+        sources_used: chatResponse.sources_used
+      }
+
+      setMessages(prev => [...prev, assistantMessage])
+      
+      // Update PDF status to refresh chunk count if needed
+      await checkPdfStatus()
+      
+    } catch (error) {
+      console.error('Error sending message:', error)
+      toast.error(error instanceof Error ? error.message : 'Failed to send message. Please check your connection and API key.')
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -244,6 +356,9 @@ export default function ChatInterface() {
 
     setMessages(prev => [...prev, userMessage])
 
+    // Clear input field immediately after adding user message
+    setQuestion('')
+
     try {
       const response = await fetch(`${getBackendUrl()}/api/chat`, {
         method: 'POST',
@@ -274,9 +389,6 @@ export default function ChatInterface() {
       }
 
       setMessages(prev => [...prev, assistantMessage])
-      
-      // Clear input field
-      setQuestion('')
       
       // Update PDF status to refresh chunk count if needed
       await checkPdfStatus()
@@ -472,6 +584,48 @@ export default function ChatInterface() {
       {/* Input */}
       <div className="bg-primary-darkest p-4">
         <div className="max-w-6xl mx-auto">
+          {/* Topic Suggestions - Always visible when PDF is loaded */}
+          {pdfStatus?.has_pdf && (topicSuggestions.length > 0 || isLoadingSuggestions) && (
+            <div className="mb-4">
+              <div className="bg-primary-darker rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-white font-medium text-sm">Quick Questions</h3>
+                  {pdfStatus?.has_pdf && topicSuggestions.length === 0 && !isLoadingSuggestions && (
+                    <button
+                      onClick={loadTopicSuggestions}
+                      className="text-primary hover:text-primary-dark text-xs transition-colors"
+                    >
+                      Generate
+                    </button>
+                  )}
+                </div>
+                
+                {isLoadingSuggestions ? (
+                  <div className="flex items-center justify-center py-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    <span className="ml-2 text-gray-300 text-xs">Generating suggestions...</span>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 flex-wrap">
+                    {topicSuggestions.map((suggestion, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleSuggestionClick(suggestion)}
+                        disabled={isLoading}
+                        className="text-left p-2 bg-primary-darkest hover:bg-primary rounded transition-colors group text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <div className="flex items-center">
+                          <span className="text-primary group-hover:text-white text-xs mr-1">💡</span>
+                          <span className="text-xs">{suggestion}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="flex space-x-4">
             <div className="flex-1">
               <textarea
