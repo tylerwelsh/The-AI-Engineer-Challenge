@@ -1,5 +1,5 @@
 # Import required FastAPI components for building the API
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 # Import Pydantic for data validation and settings management
@@ -9,6 +9,8 @@ from openai import OpenAI
 import os
 import asyncio
 import tempfile
+import logging
+import time
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -33,10 +35,16 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers in requests
 )
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Global state for storing the current PDF's vector database and metadata
 app.state.vector_db: Optional[VectorDatabase] = None
 app.state.pdf_filename: Optional[str] = None
 app.state.chunk_count: int = 0
+app.state.is_processing: bool = False
+app.state.processing_step: Optional[str] = None
 
 # Define the data model for RAG chat requests using Pydantic
 # This ensures incoming request data is properly validated
@@ -71,58 +79,102 @@ async def process_pdf_and_create_vector_db(pdf_content: bytes, filename: str, ap
     Raises:
         HTTPException: If PDF processing or embedding creation fails
     """
+    start_time = time.time()
+    logger.info(f"🚀 Starting PDF processing for: {filename} ({len(pdf_content):,} bytes)")
+    
     try:
+        # Update processing status
+        app.state.is_processing = True
+        app.state.processing_step = "Creating temporary file"
+        logger.info("📁 Creating temporary file for PDF processing")
+        
         # Create temporary file to save PDF content
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
             temp_file.write(pdf_content)
             temp_file_path = temp_file.name
         
         try:
-            # Load PDF using aimakerspace PDFLoader
+            # Step 1: Load PDF
+            app.state.processing_step = "Loading PDF content"
+            logger.info(f"📖 Loading PDF from: {temp_file_path}")
+            
             pdf_loader = PDFLoader(temp_file_path)
             pdf_loader.load_file()
             
             if not pdf_loader.documents:
+                logger.error("❌ Could not extract text from PDF")
                 raise HTTPException(status_code=400, detail="Could not extract text from PDF")
             
-            # Split text into chunks
+            total_text_length = sum(len(doc) for doc in pdf_loader.documents)
+            logger.info(f"✅ PDF loaded successfully: {len(pdf_loader.documents)} pages, {total_text_length:,} characters")
+            
+            # Step 2: Split into chunks
+            app.state.processing_step = "Splitting text into chunks"
+            logger.info("✂️ Splitting text into chunks (1000 chars, 200 overlap)")
+            
             text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             chunks = text_splitter.split_texts(pdf_loader.documents)
             
             if not chunks:
+                logger.error("❌ PDF appears to be empty or unreadable")
                 raise HTTPException(status_code=400, detail="PDF appears to be empty or unreadable")
             
-            # Set OpenAI API key for embedding model
-            os.environ["OPENAI_API_KEY"] = api_key
+            logger.info(f"✅ Text split into {len(chunks)} chunks")
             
-            # Create vector database and populate with embeddings
+            # Step 3: Set up embedding model
+            app.state.processing_step = "Setting up OpenAI embedding model"
+            logger.info("🔑 Setting up OpenAI API key and embedding model")
+            
+            os.environ["OPENAI_API_KEY"] = api_key
             embedding_model = EmbeddingModel()
             vector_db = VectorDatabase(embedding_model=embedding_model)
             
-            # Build vector database from chunks
+            # Step 4: Generate embeddings (this is the slow part)
+            app.state.processing_step = f"Generating embeddings for {len(chunks)} chunks"
+            logger.info(f"🧠 Generating embeddings for {len(chunks)} chunks (this may take a moment...)")
+            
+            embedding_start = time.time()
             await vector_db.abuild_from_list(chunks)
+            embedding_time = time.time() - embedding_start
+            
+            logger.info(f"✅ Embeddings generated in {embedding_time:.2f} seconds")
+            
+            total_time = time.time() - start_time
+            logger.info(f"🎉 PDF processing completed in {total_time:.2f} seconds!")
+            logger.info(f"📊 Final stats: {len(chunks)} chunks, {total_text_length:,} characters, ready for RAG queries")
             
             return vector_db, len(chunks)
             
         finally:
             # Clean up temporary file
+            logger.info(f"🧹 Cleaning up temporary file: {temp_file_path}")
             os.unlink(temp_file_path)
             
     except HTTPException:
+        app.state.processing_step = None
+        app.state.is_processing = False
         raise
     except Exception as e:
+        logger.error(f"❌ Error processing PDF: {str(e)}")
+        app.state.processing_step = None
+        app.state.is_processing = False
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+    finally:
+        app.state.processing_step = None
+        app.state.is_processing = False
 
 
 @app.post("/api/upload-pdf", response_model=UploadResponse)
 async def upload_pdf(
-    file: UploadFile = File(..., description="PDF file to upload and index")
+    file: UploadFile = File(..., description="PDF file to upload and index"),
+    api_key: str = Form(..., description="OpenAI API key for processing")
 ):
     """
-    Upload and index a PDF file for RAG-based chat.
+    Upload and immediately process a PDF file for RAG-based chat.
     
     Args:
         file: Uploaded PDF file
+        api_key: OpenAI API key for processing embeddings
         
     Returns:
         UploadResponse with success message, filename, and chunk count
@@ -130,6 +182,10 @@ async def upload_pdf(
     Raises:
         HTTPException: If file validation or processing fails
     """
+    # Validate API key
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=400, detail="OpenAI API key is required for processing")
+        
     # Validate file type
     if not file.filename or not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
@@ -142,24 +198,47 @@ async def upload_pdf(
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
     
-    # For this endpoint, we'll require an API key via header for initial processing
-    # In a real application, you might want to handle this differently
+    logger.info(f"📤 PDF upload received: {file.filename} ({len(content):,} bytes)")
+    
     try:
-        # Create a minimal vector database to test the API key
-        # We'll process it fully when the first chat request comes in
+        # Clear any previous PDF data
+        app.state.vector_db = None
+        app.state.chunk_count = 0
         app.state.pdf_filename = file.filename
-        app.state.pdf_content = content  # Store content temporarily
-        app.state.vector_db = None  # Will be created on first chat request
         
-        # Return success response (we'll process the PDF lazily on first chat)
-        return UploadResponse(
-            message="PDF uploaded successfully. It will be indexed when you ask your first question.",
-            filename=file.filename,
-            chunk_count=0  # Will be set when actually processed
+        # Process PDF immediately upon upload
+        logger.info("🚀 Starting immediate PDF processing...")
+        vector_db, chunk_count = await process_pdf_and_create_vector_db(
+            content, 
+            file.filename, 
+            api_key
         )
         
+        # Store the processed results
+        app.state.vector_db = vector_db
+        app.state.chunk_count = chunk_count
+        
+        logger.info(f"✅ PDF upload and processing completed: {chunk_count} chunks ready for queries")
+        
+        return UploadResponse(
+            message=f"PDF processed successfully! {chunk_count} chunks indexed and ready for questions.",
+            filename=file.filename,
+            chunk_count=chunk_count
+        )
+        
+    except HTTPException:
+        # Reset state on failure
+        app.state.vector_db = None
+        app.state.pdf_filename = None
+        app.state.chunk_count = 0
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error uploading PDF: {str(e)}")
+        # Reset state on failure
+        app.state.vector_db = None
+        app.state.pdf_filename = None
+        app.state.chunk_count = 0
+        logger.error(f"❌ Error uploading/processing PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -181,20 +260,11 @@ async def rag_chat(request: RAGChatRequest):
         raise HTTPException(status_code=400, detail="No PDF uploaded. Please upload a PDF first.")
     
     try:
-        # Process PDF if not already done (lazy loading)
+        # Check if PDF has been processed (should be processed upon upload)
         if app.state.vector_db is None:
-            if not hasattr(app.state, 'pdf_content'):
-                raise HTTPException(status_code=400, detail="PDF content not found. Please re-upload the PDF.")
+            raise HTTPException(status_code=400, detail="PDF not processed yet. Please re-upload the PDF.")
             
-            vector_db, chunk_count = await process_pdf_and_create_vector_db(
-                app.state.pdf_content, 
-                app.state.pdf_filename, 
-                request.api_key
-            )
-            app.state.vector_db = vector_db
-            app.state.chunk_count = chunk_count
-            # Clear the stored content to save memory
-            delattr(app.state, 'pdf_content')
+        logger.info(f"🔍 Searching for relevant content in {app.state.chunk_count} chunks")
         
         # Retrieve relevant context from vector database
         relevant_chunks = app.state.vector_db.search_by_text(
@@ -204,6 +274,7 @@ async def rag_chat(request: RAGChatRequest):
         )
         
         if not relevant_chunks:
+            logger.info("⚠️ No relevant chunks found for question")
             return ChatResponse(
                 answer="I am not sure.",
                 sources_used=0,
@@ -230,12 +301,16 @@ Question: {request.question}
 
 Answer:"""
 
+        logger.info("🤖 Generating response using OpenAI")
+        
         # Set OpenAI API key for chat model
         os.environ["OPENAI_API_KEY"] = request.api_key
         
         # Generate response using ChatOpenAI
         chat_model = ChatOpenAI(model_name=request.model)
         response = chat_model.run([{"role": "user", "content": rag_prompt}])
+        
+        logger.info(f"✅ Generated response: {response[:100]}{'...' if len(response) > 100 else ''}")
         
         return ChatResponse(
             answer=response,
@@ -246,23 +321,26 @@ Answer:"""
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"❌ Error processing chat request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing chat request: {str(e)}")
 
 
 @app.get("/api/status")
 async def get_status():
     """
-    Get current system status including PDF upload information.
+    Get current system status including PDF upload and processing information.
     
     Returns:
-        Dict containing current PDF filename, chunk count, and system status
+        Dict containing current PDF filename, chunk count, processing status, and system status
     """
     return {
         "status": "ok",
         "has_pdf": app.state.pdf_filename is not None,
         "pdf_filename": app.state.pdf_filename,
         "chunk_count": app.state.chunk_count,
-        "vector_db_ready": app.state.vector_db is not None
+        "vector_db_ready": app.state.vector_db is not None,
+        "is_processing": app.state.is_processing,
+        "processing_step": app.state.processing_step
     }
 
 

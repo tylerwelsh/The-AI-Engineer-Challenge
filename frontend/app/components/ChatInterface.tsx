@@ -131,6 +131,7 @@ export default function ChatInterface() {
     try {
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('api_key', apiKey)
 
       const response = await fetch(`${getBackendUrl()}/api/upload-pdf`, {
         method: 'POST',
